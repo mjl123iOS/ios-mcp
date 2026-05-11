@@ -21,6 +21,8 @@ ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
     ios-mcp_LIBRARIES = roothide
     ios-mcp_CFLAGS += -DMCP_ROOTHIDE=1
     iosmcpprefs_LIBRARIES = roothide
+else ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
+    ios-mcp_CFLAGS += -DMCP_ROOTLESS=1
 endif
 
 iosmcpprefs_FILES = prefs/IOSMCPRootListController.m prefs/IOSMCPQRCodeCell.m

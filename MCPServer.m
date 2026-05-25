@@ -13,6 +13,7 @@
 #import <unistd.h>
 #import <fcntl.h>
 #import <errno.h>
+#import <stdlib.h>
 #import <sys/utsname.h>
 #import <sys/statvfs.h>
 #import <sys/wait.h>
@@ -25,6 +26,7 @@
 #define MCP_SERVER_NAME      @"ios-mcp"
 #define MCP_SERVER_VERSION   @"1.1.0"
 #define HTTP_BUF_SIZE        (256 * 1024)
+#define MCP_MAX_CHUNK_LINE   (8 * 1024)
 #define MCP_UPLOAD_DIR       @"/tmp/ios-mcp-uploads"
 #define MCP_MAX_UPLOAD_BYTES (500LL * 1024LL * 1024LL)
 #define MCP_UPLOAD_CHUNK     (64 * 1024)
@@ -125,6 +127,60 @@ static BOOL MCPWriteAllToFD(int fd, const void *bytes, size_t length) {
         remaining -= (size_t)written;
     }
     return YES;
+}
+
+static NSRange MCPFindCRLF(NSData *data, NSUInteger offset) {
+    const uint8_t *bytes = data.bytes;
+    NSUInteger length = data.length;
+    if (!bytes || offset >= length) {
+        return NSMakeRange(NSNotFound, 0);
+    }
+
+    for (NSUInteger i = offset; i + 1 < length; i++) {
+        if (bytes[i] == '\r' && bytes[i + 1] == '\n') {
+            return NSMakeRange(i, 2);
+        }
+    }
+    return NSMakeRange(NSNotFound, 0);
+}
+
+static BOOL MCPParseHTTPChunkSize(NSData *lineData, unsigned long long *outSize) {
+    NSString *line = [[NSString alloc] initWithData:lineData encoding:NSASCIIStringEncoding];
+    if (line.length == 0) {
+        return NO;
+    }
+
+    NSString *sizePart = [line componentsSeparatedByString:@";"].firstObject;
+    sizePart = [sizePart stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (sizePart.length == 0) {
+        return NO;
+    }
+
+    const char *sizeCString = sizePart.UTF8String;
+    if (!sizeCString || sizeCString[0] == '\0') {
+        return NO;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long size = strtoull(sizeCString, &end, 16);
+    if (errno != 0 || end == sizeCString || (end && *end != '\0')) {
+        return NO;
+    }
+
+    if (outSize) {
+        *outSize = size;
+    }
+    return YES;
+}
+
+static void MCPSetHTTPBodyError(int *errorStatus, NSString **errorMessage, int status, NSString *message) {
+    if (errorStatus) {
+        *errorStatus = status;
+    }
+    if (errorMessage) {
+        *errorMessage = message;
+    }
 }
 
 static void MCPAddWhitelistedKeys(NSMutableDictionary *destination, NSDictionary *source, NSArray<NSString *> *keys) {
@@ -359,6 +415,11 @@ static NSDictionary *MCPRandomizedTapPointForElement(NSDictionary *element) {
                          initialBody:(const char *)initialBody
                    initialBodyLength:(ssize_t)initialBodyLength
                         clientSocket:(int)clientSocket;
+- (NSData *)readChunkedMCPBodyFromSocket:(int)clientSocket
+                             initialBody:(const char *)initialBody
+                       initialBodyLength:(ssize_t)initialBodyLength
+                             errorStatus:(int *)errorStatus
+                            errorMessage:(NSString **)errorMessage;
 - (void)handleMCPRequest:(NSData *)bodyData clientSocket:(int)clientSocket;
 - (NSDictionary *)routeMCPRequest:(NSDictionary *)request;
 - (NSDictionary *)handleInitialize:(id)reqId;
@@ -572,12 +633,41 @@ static NSDictionary *MCPRandomizedTapPointForElement(NSDictionary *element) {
     if (contentLengthHeader.length > 0) {
         contentLength = contentLengthHeader.integerValue;
     }
+    NSString *transferEncoding = [headers[@"transfer-encoding"] lowercaseString] ?: @"";
+    BOOL chunkedBody = [transferEncoding containsString:@"chunked"];
 
     ssize_t bodyReceived = totalRead - headerEnd;
     NSString *basePath = MCPBasePath(path);
 
     // Route request
     if ([method isEqualToString:@"POST"] && [basePath isEqualToString:@"/mcp"]) {
+        NSString *expect = [headers[@"expect"] lowercaseString] ?: @"";
+        if ([expect containsString:@"100-continue"]) {
+            NSData *continueData = [@"HTTP/1.1 100 Continue\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+            [self writeAll:clientSocket data:continueData];
+        }
+
+        if (chunkedBody) {
+            int errorStatus = 400;
+            NSString *errorMessage = nil;
+            NSData *bodyData = [self readChunkedMCPBodyFromSocket:clientSocket
+                                                      initialBody:buffer + headerEnd
+                                                initialBodyLength:MAX((ssize_t)0, bodyReceived)
+                                                      errorStatus:&errorStatus
+                                                     errorMessage:&errorMessage];
+            if (!bodyData) {
+                [self sendErrorResponse:clientSocket status:errorStatus message:errorMessage ?: @"Invalid chunked MCP request body"];
+                free(buffer);
+                close(clientSocket);
+                return;
+            }
+
+            [self handleMCPRequest:bodyData clientSocket:clientSocket];
+            free(buffer);
+            close(clientSocket);
+            return;
+        }
+
         if (contentLength < 0) contentLength = 0;
         if (contentLength > HTTP_BUF_SIZE - headerEnd - 1) {
             [self sendErrorResponse:clientSocket status:413 message:@"MCP request body too large"];
@@ -623,6 +713,91 @@ static NSDictionary *MCPRandomizedTapPointForElement(NSDictionary *element) {
 
     free(buffer);
     close(clientSocket);
+}
+
+- (NSData *)readChunkedMCPBodyFromSocket:(int)clientSocket
+                             initialBody:(const char *)initialBody
+                       initialBodyLength:(ssize_t)initialBodyLength
+                             errorStatus:(int *)errorStatus
+                            errorMessage:(NSString **)errorMessage {
+    NSMutableData *encoded = [NSMutableData data];
+    if (initialBody && initialBodyLength > 0) {
+        [encoded appendBytes:initialBody length:(NSUInteger)initialBodyLength];
+    }
+
+    NSMutableData *decoded = [NSMutableData data];
+    NSUInteger offset = 0;
+
+    BOOL (^readMore)(void) = ^BOOL {
+        uint8_t chunk[MCP_UPLOAD_CHUNK];
+        while (YES) {
+            ssize_t n = read(clientSocket, chunk, sizeof(chunk));
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n <= 0) {
+                return NO;
+            }
+            [encoded appendBytes:chunk length:(NSUInteger)n];
+            return YES;
+        }
+    };
+
+    while (YES) {
+        NSRange lineEnd = MCPFindCRLF(encoded, offset);
+        while (lineEnd.location == NSNotFound) {
+            if (encoded.length >= offset && encoded.length - offset > MCP_MAX_CHUNK_LINE) {
+                MCPSetHTTPBodyError(errorStatus, errorMessage, 400, @"Malformed chunked MCP request body");
+                return nil;
+            }
+            if (!readMore()) {
+                MCPSetHTTPBodyError(errorStatus, errorMessage, 400, @"Incomplete chunked MCP request body");
+                return nil;
+            }
+            lineEnd = MCPFindCRLF(encoded, offset);
+        }
+
+        NSData *lineData = [encoded subdataWithRange:NSMakeRange(offset, lineEnd.location - offset)];
+        unsigned long long chunkSize = 0;
+        if (!MCPParseHTTPChunkSize(lineData, &chunkSize)) {
+            MCPSetHTTPBodyError(errorStatus, errorMessage, 400, @"Malformed chunked MCP request body");
+            return nil;
+        }
+
+        offset = lineEnd.location + 2;
+        if (chunkSize == 0) {
+            return [decoded copy];
+        }
+
+        if (chunkSize > (unsigned long long)HTTP_BUF_SIZE ||
+            decoded.length > HTTP_BUF_SIZE - (NSUInteger)chunkSize) {
+            MCPSetHTTPBodyError(errorStatus, errorMessage, 413, @"MCP request body too large");
+            return nil;
+        }
+
+        NSUInteger chunkLength = (NSUInteger)chunkSize;
+        NSUInteger needed = chunkLength + 2;
+        while (encoded.length < offset || encoded.length - offset < needed) {
+            if (!readMore()) {
+                MCPSetHTTPBodyError(errorStatus, errorMessage, 400, @"Incomplete chunked MCP request body");
+                return nil;
+            }
+        }
+
+        const uint8_t *bytes = encoded.bytes;
+        if (bytes[offset + chunkLength] != '\r' || bytes[offset + chunkLength + 1] != '\n') {
+            MCPSetHTTPBodyError(errorStatus, errorMessage, 400, @"Malformed chunked MCP request body");
+            return nil;
+        }
+
+        [decoded appendBytes:bytes + offset length:chunkLength];
+        offset += needed;
+
+        if (offset > MCP_UPLOAD_CHUNK) {
+            [encoded replaceBytesInRange:NSMakeRange(0, offset) withBytes:NULL length:0];
+            offset = 0;
+        }
+    }
 }
 
 - (NSString *)uploadFileNameFromRequestPath:(NSString *)path headers:(NSDictionary *)headers {

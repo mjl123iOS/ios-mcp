@@ -955,7 +955,7 @@ BigBoss 是第三方仓库，提交后会进入 BigBoss 审核流程。该操作
 
 ```text
 脚本：scripts/submit_bigboss_update.py
-Package Name：iOS MCP
+默认 Package Name：iOS MCP
 Your Name：witchan
 Email：witchan028@126.com
 ```
@@ -965,8 +965,25 @@ Email：witchan028@126.com
 ```text
 版本号
 Changes Made（必须中英文双语）
+Package Name（可选；roothide 必须使用 iOS MCP (roothide)）
 deb 路径
 ```
+
+rootful 和 rootless 提交到 BigBoss 时，BigBoss 表单 `Package Name` 使用默认值：
+
+```text
+iOS MCP
+```
+
+roothide 提交到 BigBoss 时，必须使用独立包身份，避免和普通 rootless 包混用：
+
+```text
+control Package：com.witchan.ios-mcp-roothide
+control Name：iOS MCP (roothide)
+BigBoss Package Name：iOS MCP (roothide)
+```
+
+roothide 的 BigBoss 包是专用于 BigBoss 提交的重新打包产物，不替换 GitHub Release 中的普通 roothide asset。
 
 BigBoss 的 `Changes Made` 默认必须使用简短中英文双语，不要写成长篇 Release notes。必须先中文、再英文。推荐格式：
 
@@ -981,7 +998,6 @@ EN: xxx.
 
 触发 BigBoss 流程后，必须先让用户确认以下内容：
 
-```text
 准备提交到 BigBoss：
 
 版本号：
@@ -997,8 +1013,40 @@ packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
 rootless deb：
 packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
 
+roothide BigBoss deb：
+packages/com.witchan.ios-mcp-roothide_1.1.0_iphoneos-arm64e.deb
+
 准备执行：
 
+临时修改 control：
+
+```text
+Package: com.witchan.ios-mcp-roothide
+Name: iOS MCP (roothide)
+```
+
+构建 roothide BigBoss 包：
+
+```bash
+printf "3\n1\n" | ./build.sh
+```
+
+恢复 control：
+
+```text
+Package: com.witchan.ios-mcp
+Name: iOS MCP
+```
+
+检查 control 已恢复：
+
+```bash
+git diff -- control
+```
+
+提交 BigBoss 表单：
+
+```bash
 python3 scripts/submit_bigboss_update.py \
   --version 1.1.0 \
   --changes "中文：xxx。
@@ -1015,40 +1063,85 @@ EN: xxx." \
   packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb \
   --submit
 
-是否确认提交到 BigBoss 审核？
+python3 scripts/submit_bigboss_update.py \
+  --package-name "iOS MCP (roothide)" \
+  --version 1.1.0 \
+  --changes "中文：xxx。
+EN: xxx." \
+  --response-out .codex-session-data/bigboss_update_1.1.0_roothide_response.html \
+  packages/com.witchan.ios-mcp-roothide_1.1.0_iphoneos-arm64e.deb \
+  --submit
 ```
+
+是否确认提交到 BigBoss 审核？
 
 只有用户明确确认后，才能执行提交。
 
 ### 4. deb 文件规则
 
-默认只提交 BigBoss 支持的两个包：
+默认提交 BigBoss 支持的三个包：
 
 ```text
 rootful：packages/com.witchan.ios-mcp_版本号_iphoneos-arm.deb
 rootless：packages/com.witchan.ios-mcp_版本号_iphoneos-arm64.deb
+roothide：packages/com.witchan.ios-mcp-roothide_版本号_iphoneos-arm64e.deb
 ```
 
-不要默认提交 roothide 包：
+roothide 不直接提交普通 Release 包：
 
 ```text
 packages/com.witchan.ios-mcp_版本号_iphoneos-arm64e.deb
 ```
 
-除非用户明确要求，否则 BigBoss 流程不上传 roothide。
+提交 roothide 到 BigBoss 前，必须临时修改 `control`：
+
+```text
+Package: com.witchan.ios-mcp-roothide
+Name: iOS MCP (roothide)
+```
+
+然后构建正式 roothide 包：
+
+```bash
+printf "3\n1\n" | ./build.sh
+```
+
+构建完成后必须检查生成的是：
+
+```text
+packages/com.witchan.ios-mcp-roothide_版本号_iphoneos-arm64e.deb
+```
+
+roothide BigBoss 包构建完成后，必须把 `control` 恢复为普通包配置：
+
+```text
+Package: com.witchan.ios-mcp
+Name: iOS MCP
+```
+
+恢复后必须检查 `git diff -- control`，确认没有遗留临时包名改动。临时修改 `control` 只用于生成 BigBoss roothide 包，默认不要提交这些临时改动。
 
 ### 5. 执行前检查
 
-用户确认后，执行前必须检查：
+用户确认后，执行前必须先生成或确认 roothide BigBoss 包：
+
+1. 如果 `packages/com.witchan.ios-mcp-roothide_版本号_iphoneos-arm64e.deb` 不存在，按上一节规则临时修改 `control`，执行 `printf "3\n1\n" | ./build.sh` 构建，然后恢复 `control`。
+2. 如果该 roothide BigBoss 包已存在，也必须检查文件名确认包名是 `com.witchan.ios-mcp-roothide`，不要上传普通 `com.witchan.ios-mcp_版本号_iphoneos-arm64e.deb`。
+3. 构建或确认完成后，执行以下检查：
 
 ```bash
 git status --short --branch
 ls -l packages/com.witchan.ios-mcp_版本号_iphoneos-arm.deb
 ls -l packages/com.witchan.ios-mcp_版本号_iphoneos-arm64.deb
+ls -l packages/com.witchan.ios-mcp-roothide_版本号_iphoneos-arm64e.deb
+git diff -- control
 python3 scripts/submit_bigboss_update.py --help
 ```
 
-如果任一 deb 不存在，必须停止并提示用户先构建正式包，不允许提交旧版本或错误路径的包。
+如果 rootful 或 rootless deb 不存在，必须停止并提示用户先构建正式包。
+如果 roothide BigBoss deb 构建后仍不存在，必须停止，不允许用普通 roothide Release 包替代。
+不允许提交旧版本或错误路径的包。
+如果 `git diff -- control` 显示仍有 roothide 临时包名改动，必须先恢复 `control` 后再提交 BigBoss。
 
 ### 6. 执行提交
 
@@ -1068,9 +1161,17 @@ python3 scripts/submit_bigboss_update.py \
   --response-out .codex-session-data/bigboss_update_版本号_rootless_response.html \
   packages/com.witchan.ios-mcp_版本号_iphoneos-arm64.deb \
   --submit
+
+python3 scripts/submit_bigboss_update.py \
+  --package-name "iOS MCP (roothide)" \
+  --version 版本号 \
+  --changes "用户确认后的中英文双语 Changes Made" \
+  --response-out .codex-session-data/bigboss_update_版本号_roothide_response.html \
+  packages/com.witchan.ios-mcp-roothide_版本号_iphoneos-arm64e.deb \
+  --submit
 ```
 
-如果第一条已成功、第二条失败，必须明确告诉用户 BigBoss 可能已经收到 rootful 提交，当前处于部分提交状态。不要自动重复提交成功的包，除非用户明确确认重试。
+如果前面的提交已成功、后面的提交失败，必须明确告诉用户 BigBoss 可能已经收到哪些包，当前处于部分提交状态。不要自动重复提交成功的包，除非用户明确确认重试。
 
 ### 7. 完成后的输出格式
 
@@ -1082,10 +1183,12 @@ BigBoss 提交完成：
 版本：1.1.0
 rootful：已提交
 rootless：已提交
+roothide：已提交
 审核状态：等待 BigBoss 审核
 响应记录：
 .codex-session-data/bigboss_update_1.1.0_rootful_response.html
 .codex-session-data/bigboss_update_1.1.0_rootless_response.html
+.codex-session-data/bigboss_update_1.1.0_roothide_response.html
 ```
 
 ---
@@ -1108,3 +1211,4 @@ Codex 必须始终遵守以下要求：
 12. GitHub Release 默认使用 GitHub REST API 创建/更新，并上传 rootful、rootless、roothide 三个正式包。
 13. GitHub Release 内容默认使用中英文双语格式，并包含 Release assets；默认不添加说明部分。
 14. GitHub 网络或沙箱失败时必须停止危险后续步骤，明确说明本地状态和恢复命令。
+15. BigBoss 默认提交 rootful、rootless、roothide 三个包；roothide 必须使用 `com.witchan.ios-mcp-roothide` 和 `iOS MCP (roothide)` 重新打包后提交。

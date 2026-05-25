@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 FORM_URL = "http://thebigboss.org/hosting-repository-cydia/update-your-app"
 FORM_ID = "cforms3form"
-PACKAGE_NAME = "iOS MCP"
+DEFAULT_PACKAGE_NAME = "iOS MCP"
 BIGBOSS_NAME = "witchan"
 BIGBOSS_EMAIL = "witchan028@126.com"
 DEFAULT_RESPONSE_OUT = ".codex-session-data/bigboss_update_response.html"
@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("deb", help="Path to the .deb package to upload.")
     parser.add_argument("--url", default=FORM_URL)
+    parser.add_argument(
+        "--package-name",
+        default=DEFAULT_PACKAGE_NAME,
+        help="Package name shown on the BigBoss update form.",
+    )
     parser.add_argument("--version", required=True)
     changes = parser.add_mutually_exclusive_group(required=True)
     changes.add_argument("--changes", help="Text for the BigBoss Changes Made field.")
@@ -185,7 +190,7 @@ def main() -> int:
     fields_map = dict(hidden_fields)
     fields_map.update(
         {
-            "cf3_field_1": PACKAGE_NAME,
+            "cf3_field_1": args.package_name,
             "cf3_field_2": args.version,
             "cf3_field_3": BIGBOSS_NAME,
             "cf3_field_4": BIGBOSS_EMAIL,
@@ -198,7 +203,7 @@ def main() -> int:
 
     print(f"BigBoss form: {args.url}")
     print(f"POST action: {action_url}")
-    print(f"Package name: {PACKAGE_NAME}")
+    print(f"Package name: {args.package_name}")
     print(f"Version: {args.version}")
     print(f"Name: {BIGBOSS_NAME}")
     print(f"Email: {BIGBOSS_EMAIL}")
